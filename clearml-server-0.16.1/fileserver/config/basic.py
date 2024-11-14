@@ -1,0 +1,145 @@
+import logging
+import os
+from functools import reduce
+from os import getenv
+from os.path import expandvars
+from pathlib import Path
+
+from pyhocon import ConfigTree, ConfigFactory
+from pyparsing import (
+    ParseFatalException,
+    ParseException,
+    RecursiveGrammarException,
+    ParseSyntaxException,
+)
+
+DEFAULT_EXTRA_CONFIG_PATH = "/opt/trains/config"
+EXTRA_CONFIG_PATH_ENV_KEY = "TRAINS_CONFIG_DIR"
+EXTRA_CONFIG_PATH_SEP = ":"
+
+EXTRA_CONFIG_VALUES_ENV_KEY_SEP = "__"
+EXTRA_CONFIG_VALUES_ENV_KEY_PREFIX = f"TRAINS{EXTRA_CONFIG_VALUES_ENV_KEY_SEP}"
+
+
+class BasicConfig:
+    NotSet = object()
+
+    def __init__(self, folder):
+        self.folder = Path(folder)
+        if not self.folder.is_dir():
+            raise ValueError("Invalid configuration folder")
+
+        self.prefix = "trains"
+
+        self._load()
+
+    def __getitem__(self, key):
+        return self._config[key]
+
+    def get(self, key, default=NotSet):
+        value = self._config.get(key, default)
+        if value is self.NotSet and not default:
+            raise KeyError(
+                f"Unable to find value for key '{key}' and default value was not provided."
+            )
+        return value
+
+    def logger(self, name):
+        if Path(name).is_file():
+            name = Path(name).stem
+        path = ".".join((self.prefix, Path(name).stem))
+        return logging.getLogger(path)
+
+    @staticmethod
+    def _read_extra_env_config_values():
+        """ Loads extra configuration from environment-injected values """
+        result = ConfigTree()
+        prefix = EXTRA_CONFIG_VALUES_ENV_KEY_PREFIX
+
+        keys = sorted(k for k in os.environ if k.startswith(prefix))
+        for key in keys:
+            path = key[len(prefix) :].replace(EXTRA_CONFIG_VALUES_ENV_KEY_SEP, ".").lower()
+            result = ConfigTree.merge_configs(
+                result, ConfigFactory.parse_string(f"{path}: {os.environ[key]}")
+            )
+
+        return result
+
+    @staticmethod
+    def _read_env_paths(key):
+        value = getenv(EXTRA_CONFIG_PATH_ENV_KEY, DEFAULT_EXTRA_CONFIG_PATH)
+        if value is None:
+            return
+        paths = [
+            Path(expandvars(v)).expanduser() for v in value.split(EXTRA_CONFIG_PATH_SEP)
+        ]
+        invalid = [
+            path
+            for path in paths
+            if not path.is_dir() and str(path) != DEFAULT_EXTRA_CONFIG_PATH
+        ]
+        if invalid:
+            print(f"WARNING: Invalid paths in {key} env var: {' '.join(invalid)}")
+        return [path for path in paths if path.is_dir()]
+
+    def _load(self, verbose=True):
+        extra_config_paths = self._read_env_paths(EXTRA_CONFIG_PATH_ENV_KEY) or []
+        extra_config_values = self._read_extra_env_config_values()
+        configs = [
+            self._read_recursive(path, verbose=verbose)
+            for path in [self.folder] + extra_config_paths
+        ]
+
+        self._config = reduce(
+            lambda last, config: ConfigTree.merge_configs(
+                last, config, copy_trees=True
+            ),
+            configs + [extra_config_values],
+            ConfigTree(),
+        )
+
+    def _read_recursive(self, conf_root, verbose=True):
+        conf = ConfigTree()
+
+        if not conf_root:
+            return conf
+
+        if not conf_root.is_dir():
+            if verbose:
+                if not conf_root.exists():
+                    print(f"No config in {conf_root}")
+                else:
+                    print(f"Not a directory: {conf_root}")
+            return conf
+
+        if verbose:
+            print(f"Loading config from {conf_root}")
+
+        for file in conf_root.rglob("*.conf"):
+            key = ".".join(file.relative_to(conf_root).with_suffix("").parts)
+            conf.put(key, self._read_single_file(file, verbose=verbose))
+
+        return conf
+
+    @staticmethod
+    def _read_single_file(file_path, verbose=True):
+        if verbose:
+            print(f"Loading config from file {file_path}")
+
+        try:
+            return ConfigFactory.parse_file(file_path)
+        except ParseSyntaxException as ex:
+            msg = f"Failed parsing {file_path} ({ex.__class__.__name__}): (at char {ex.loc}, line:{ex.lineno}, col:{ex.column})"
+            raise ConfigurationError(msg, file_path=file_path) from ex
+        except (ParseException, ParseFatalException, RecursiveGrammarException) as ex:
+            msg = f"Failed parsing {file_path} ({ex.__class__.__name__}): {ex}"
+            raise ConfigurationError(msg) from ex
+        except Exception as ex:
+            print(f"Failed loading {file_path}: {ex}")
+            raise
+
+
+class ConfigurationError(Exception):
+    def __init__(self, msg, file_path=None, *args):
+        super(ConfigurationError, self).__init__(msg, *args)
+        self.file_path = file_path

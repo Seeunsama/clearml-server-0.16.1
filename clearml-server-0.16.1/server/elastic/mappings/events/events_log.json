@@ -1,0 +1,15 @@
+{
+  "index_patterns": "events-log-*",
+  "order": 1,
+  "mappings": {
+    "properties": {
+      "msg": {
+        "type": "text",
+        "index": false
+      },
+      "level": {
+        "type": "keyword"
+      }
+    }
+  }
+}

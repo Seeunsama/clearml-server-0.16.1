@@ -1,0 +1,12 @@
+{
+  "index_patterns": "events-plot-*",
+  "order": 1,
+  "mappings": {
+    "properties": {
+      "plot_str": {
+        "type": "text",
+        "index": false
+      }
+    }
+  }
+}
